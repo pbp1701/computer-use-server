@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Computer-Use Assistant</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --text:#e8eaed; --muted:#9aa0a6; --accent:#4f8cff; --user:#2a2f3a; --bot:#1c2333; --border:#2a2f3a; }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,Segoe UI,Roboto,sans-serif; background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:12px; padding:10px 16px; border-bottom:1px solid var(--border); background:var(--panel); }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  .status { font-size:12px; color:var(--muted); margin-left:auto; }
+  .status.ok { color:#3dd68c; }
+  .status.bad { color:#ff6b6b; }
+  main { flex:1; display:flex; overflow:hidden; }
+  #chat { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { max-width:75%; padding:10px 14px; border-radius:12px; white-space:pre-wrap; word-wrap:break-word; font-size:14px; line-height:1.45; }
+  .msg.user { align-self:flex-end; background:var(--user); border:1px solid var(--border); }
+  .msg.bot { align-self:flex-start; background:var(--bot); border:1px solid var(--border); }
+  .msg .role { font-size:11px; color:var(--muted); margin-bottom:4px; }
+  footer { border-top:1px solid var(--border); background:var(--panel); padding:10px 16px; }
+  .input-row { display:flex; gap:8px; align-items:flex-end; }
+  #input { flex:1; background:#0f1115; border:1px solid var(--border); border-radius:10px; color:var(--text); padding:10px 12px; font-size:14px; resize:none; min-height:42px; max-height:160px; }
+  button { background:var(--accent); color:#fff; border:none; border-radius:10px; padding:10px 16px; font-size:14px; cursor:pointer; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.mic { background:#2a2f3a; }
+  button.mic.listening { background:#ff6b6b; }
+  .settings-btn { background:#2a2f3a; }
+  .overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,.6); z-index:10; align-items:center; justify-content:center; }
+  .overlay.open { display:flex; }
+  .modal { background:var(--panel); border:1px solid var(--border); border-radius:12px; width:min(640px,90vw); max-height:80vh; display:flex; flex-direction:column; }
+  .modal header { border-bottom:1px solid var(--border); }
+  .modal .body { padding:16px; overflow-y:auto; }
+  .modal label { display:block; font-size:12px; color:var(--muted); margin:12px 0 4px; }
+  .modal textarea { width:100%; background:#0f1115; border:1px solid var(--border); border-radius:8px; color:var(--text); padding:10px; font-size:13px; font-family:ui-monospace,Consolas,monospace; }
+  .modal .row { display:flex; gap:8px; justify-content:flex-end; margin-top:12px; }
+  .modal button.secondary { background:#2a2f3a; }
+  .hint { font-size:12px; color:var(--muted); margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Computer-Use Assistant</h1>
+  <span id="status" class="status">connecting...</span>
+  <button class="settings-btn" onclick="openSettings()">Settings</button>
+</header>
+<main>
+  <div id="chat"></div>
+</main>
+<footer>
+  <div class="input-row">
+    <textarea id="input" placeholder="Type a message..." rows="1"></textarea>
+    <button class="mic" id="micBtn" onclick="toggleMic()">Mic</button>
+    <button id="sendBtn" onclick="send()">Send</button>
+  </div>
+</footer>
+
+<div class="overlay" id="settingsOverlay">
+  <div class="modal">
+    <header><h1 style="font-size:15px">Settings</h1></header>
+    <div class="body">
+      <label>Server URL (the cloudflared tunnel URL, no trailing slash)</label>
+      <textarea id="serverUrl" rows="2" placeholder="https://xxxx.trycloudflare.com"></textarea>
+      <label>System Prompt (attached to every message automatically)</label>
+      <textarea id="sysPrompt" rows="10"></textarea>
+      <div class="hint">Saved in this browser. Changes apply to new messages immediately.</div>
+      <div class="row">
+        <button class="secondary" onclick="closeSettings()">Close</button>
+        <button onclick="saveSettings()">Save</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const chat = document.getElementById('chat');
+const input = document.getElementById('input');
+const statusEl = document.getElementById('status');;
+const micBtn = document.getElementById('micBtn');
+const sendBtn = document.getElementById('sendBtn');;
+
+const DEFAULT_PROMPT = `You are a computer-use assistant. You see the user's screen and control their PC.
+
+Rules:
+- Prefer keyboard over mouse clicks whenever possible (typing, shortcuts, URLs).
+- Use clicks only when there is no keyboard way to do the task.
+- Confirm before any destructive action (delete, format, uninstall, shutdown).
+- Reply with one clear action at a time: what to type or where to click.
+- If a click misses, say so and suggest the keyboard alternative.
+- Keep answers short. No explanations unless asked.`;
+
+let history = [];
+try { history = JSON.parse(localStorage.getItem('cua_history') || '[]'); } catch(e) { history = []; }
+
+function getServer() { return (localStorage.getItem('cua_server') || '').replace(/\/$/, ''); }
+function getPrompt() { return localStorage.getItem('cua_prompt') || DEFAULT_PROMPT; }
+
+function render() {
+  chat.innerHTML = '';
+  history.forEach(m => {
+    const div = document.createElement('div');;
+    div.className = 'msg ' + m.role;
+    div.innerHTML = '<div class="role">' + (m.role === 'user' ? 'You' : 'Assistant') + '</div>' + escapeHtml(m.content);
+    chat.appendChild(div);
+  });
+  chat.scrollTop = chat.scrollHeight;
+}
+function escapeHtml(s) { return s.replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>'); }
+
+function addMsg(role, content) {
+  history.push({ role, content, t: Date.now() });
+  localStorage.setItem('cua_history', JSON.stringify(history));
+  render();
+}
+
+async function checkHealth() {
+  const s = getServer();
+  if (!s) { statusEl.textContent = 'no server set'; statusEl.className = 'status bad'; return; }
+  try {
+    const r = await fetch(s + '/health', { method: 'GET' });
+    if (r.ok) { statusEl.textContent = 'connected'; statusEl.className = 'status ok'; }
+    else { statusEl.textContent = 'server error'; statusEl.className = 'status bad'; }
+  } catch(e) { statusEl.textContent = 'unreachable'; statusEl.className = 'status bad'; }
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text) return;
+  const s = getServer();
+  if (!s) { alert('Set the server URL in Settings first.'); return; }
+  input.value = '';
+  addMsg('user', text);
+  sendBtn.disabled = true;
+  try {
+    const r = await fetch(s + '/v1/chat/completions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'ui-tars', messages: [{ role: 'user', content: text }], max_tokens: 512, temperature: 0.2 })
+    });
+    const data = await r.json();
+    const reply = data.choices && data.choices[0] && data.choices[0].message ? data.choices[0].message.content : JSON.stringify(data);
+    addMsg('bot', reply);
+  } catch(e) {
+    addMsg('bot', 'Error: ' + e.message);
+  }
+  sendBtn.disabled = false;
+}
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } });
+
+function openSettings() {
+  document.getElementById('serverUrl').value = localStorage.getItem('cua_server') || '';
+  document.getElementById('sysPrompt').value = getPrompt();
+  document.getElementById('settingsOverlay').classList.add('open');;
+}
+function closeSettings() { document.getElementById('settingsOverlay').classList.remove('open'); }
+function saveSettings() {
+  localStorage.setItem('cua_server', document.getElementById('serverUrl').value.trim());
+  localStorage.setItem('cua_prompt', document.getElementById('sysPrompt').value);
+  closeSettings();
+  checkHealth();
+}
+
+let recog = null;
+function toggleMic() {
+  if (recog) { recog.stop(); recog = null; micBtn.classList.remove('listening'); micBtn.textContent = 'Mic'; return; }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) { alert('Voice input not supported in this browser.'); return; }
+  recog = new SR();
+  recog.lang = 'en-US';
+  recog.interimResults = false;
+  recog.onresult = e => { input.value = e.results[0][0].transcript; send(); };
+  recog.onend = () => { recog = null; micBtn.classList.remove('listening'); micBtn.textContent = 'Mic'; };
+  recog.start();
+  micBtn.classList.add('listening');;
+  micBtn.textContent = 'Stop';
+}
+
+render();
+checkHealth();
+setInterval(checkHealth, 30000);
+</script>
+</body>
+</html>
